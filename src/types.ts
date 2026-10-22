@@ -42,6 +42,6 @@ export type VoiceIntent = {
   kind: "route"
   destination: string
   startNavigation: boolean
-} | { kind: "report" barrier: string } | { kind: "action" screen: Screen } | {
+} | { kind: "report"; barrier: string } | { kind: "action"; screen: Screen } | {
   kind: "unknown"
 }

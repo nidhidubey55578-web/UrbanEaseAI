@@ -32,6 +32,32 @@ import { syncReportToSupabase, SUPABASE_URL } from "./lib/supabase"
 
 let activeSpeechUtterance: SpeechSynthesisUtterance | null = null
 
+export function playMicChime() {
+  try {
+    const AudioContextClass =
+      window.AudioContext || (window as any).webkitAudioContext
+    if (!AudioContextClass) return
+    const ctx = new AudioContextClass()
+    if (ctx.state === "suspended") {
+      ctx.resume()
+    }
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.type = "sine"
+    const now = ctx.currentTime
+    osc.frequency.setValueAtTime(587.33, now) // D5
+    osc.frequency.exponentialRampToValueAtTime(880, now + 0.12) // A5
+    gain.gain.setValueAtTime(0.18, now)
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28)
+    osc.start(now)
+    osc.stop(now + 0.28)
+  } catch {
+    // Non-fatal if audio context is blocked
+  }
+}
+
 export function getVoiceGreeting(lang: Language): string {
   if (lang === "Hindi") {
     return "नमस्ते! मैं आपको दिशा खोजने में कैसे मदद कर सकता हूँ?"
@@ -43,28 +69,59 @@ export function getVoiceGreeting(lang: Language): string {
 }
 
 function speakText(text: string, lang: Language, onEnd?: () => void) {
+  playMicChime()
+
   if (typeof window === "undefined" || !("speechSynthesis" in window)) {
     onEnd?.()
     return
   }
   try {
-    window.speechSynthesis.cancel()
     if (window.speechSynthesis.paused) {
       window.speechSynthesis.resume()
     }
-    const utterance = new SpeechSynthesisUtterance(text)
-    activeSpeechUtterance = utterance // Prevent garbage collection bug in Chromium
 
-    const locale =
+    const voices = window.speechSynthesis.getVoices()
+    const targetLocale =
       lang === "Hindi" ? "hi-IN" : lang === "Marathi" ? "mr-IN" : "en-IN"
-    utterance.lang = locale
+    const targetLangCode =
+      lang === "Hindi" ? "hi" : lang === "Marathi" ? "mr" : "en"
+
+    let matchingVoice = voices.find(
+      (v) =>
+        v.lang.toLowerCase().startsWith(targetLangCode) ||
+        v.name.toLowerCase().includes(lang.toLowerCase()),
+    )
+
+    let textToSpeak = text
+    let voiceLocale = targetLocale
+
+    // If Hindi or Marathi TTS voice pack is not installed on Windows/Browser,
+    // fallback to English voice with phonetic greeting so it audibly speaks out loud!
+    if (!matchingVoice && (lang === "Hindi" || lang === "Marathi")) {
+      matchingVoice =
+        voices.find((v) => v.lang.toLowerCase().includes("in")) ||
+        voices.find((v) => v.lang.toLowerCase().startsWith("en")) ||
+        voices[0]
+
+      voiceLocale = matchingVoice?.lang || "en-IN"
+
+      if (text.includes("नमस्ते") || text.includes("दिशा")) {
+        textToSpeak = "Namaste! How can I help you with directions?"
+      } else if (text.includes("नमस्कार") || text.includes("दिशा")) {
+        textToSpeak = "Namaskar! How can I help you with directions?"
+      } else if (text.includes("बाधा") || text.includes("रिपोर्ट")) {
+        textToSpeak = "Opening barrier report form."
+      } else if (text.includes("मार्ग") || text.includes("रास्ता")) {
+        textToSpeak = "Calculating accessible routes."
+      }
+    }
+
+    const utterance = new SpeechSynthesisUtterance(textToSpeak)
+    activeSpeechUtterance = utterance // Prevent Chromium GC bug
+    utterance.lang = voiceLocale
     utterance.rate = 1.0
     utterance.pitch = 1.0
 
-    const voices = window.speechSynthesis.getVoices()
-    const matchingVoice = voices.find((v) =>
-      v.lang.toLowerCase().startsWith(locale.slice(0, 2).toLowerCase()),
-    )
     if (matchingVoice) {
       utterance.voice = matchingVoice
     }
@@ -80,10 +137,17 @@ function speakText(text: string, lang: Language, onEnd?: () => void) {
     utterance.onend = finish
     utterance.onerror = finish
 
-    // Safety timeout so execution is never blocked if speech engine hangs
-    setTimeout(finish, 3800)
+    // Safety timeout so UI never hangs
+    setTimeout(finish, 4000)
 
-    window.speechSynthesis.speak(utterance)
+    if (window.speechSynthesis.speaking) {
+      window.speechSynthesis.cancel()
+      setTimeout(() => {
+        window.speechSynthesis.speak(utterance)
+      }, 50)
+    } else {
+      window.speechSynthesis.speak(utterance)
+    }
   } catch (err) {
     console.warn("Speech synthesis notice:", err)
     onEnd?.()
@@ -1669,11 +1733,13 @@ function VoiceAssistant({
   go,
   back,
   speak,
+  onVoiceCommand,
 }: {
   language: Language
   go: (s: Screen) => void
   back: () => void
   speak: (s: string) => void
+  onVoiceCommand?: (cmd: string) => void
 }) {
   const [state, setState] =
     useState<"Ready" | "Listening" | "Processing" | "Error">("Ready")
@@ -1722,21 +1788,54 @@ function VoiceAssistant({
 
   const runCommand = (cmd: string) => {
     setText(cmd)
-    if (cmd === "Report barrier" || cmd.includes("report")) go("report")
-    else if (cmd === "Open saved routes" || cmd.includes("saved")) go("saved")
-    else if (cmd === "Change preferences" || cmd.includes("preference"))
+    const lower = cmd.toLowerCase().trim()
+    if (
+      lower.includes("report") ||
+      lower.includes("barrier") ||
+      lower.includes("बाधा") ||
+      lower.includes("खड्डा") ||
+      lower.includes("pothole")
+    ) {
+      speak("Opening barrier report form.")
+      go("report")
+    } else if (lower.includes("saved") || lower.includes("bookmark")) {
+      speak("Opening saved routes.")
+      go("saved")
+    } else if (
+      lower.includes("preference") ||
+      lower.includes("stair") ||
+      lower.includes("wheelchair") ||
+      lower.includes("avoid")
+    ) {
+      speak("Opening accessibility settings.")
       go("setup")
-    else if (cmd === "Change language" || cmd.includes("language"))
+    } else if (lower.includes("language") || lower.includes("भाषा")) {
+      speak("Opening language settings.")
       go("language")
-    else if (cmd === "Find accessible route" || cmd.includes("route"))
+    } else if (
+      lower.includes("navigation") ||
+      lower.includes("journey") ||
+      lower.includes("start") ||
+      lower.includes("चलो")
+    ) {
+      speak("Starting step-free navigation.")
+      go("journey")
+    } else if (
+      lower.includes("planner") ||
+      lower.includes("plan") ||
+      lower.includes("find accessible route")
+    ) {
+      speak("Opening route planner.")
       go("planner")
-    else if (cmd === "Start navigation" || cmd.includes("start")) go("journey")
-    else
+    } else if (onVoiceCommand) {
+      onVoiceCommand(cmd)
+    } else {
       speak(
-        cmd === "Repeat instruction"
+        lower.includes("repeat")
           ? "In 120 metres, keep left toward the step-free entrance."
-          : "Command understood.",
+          : `Looking for accessible route to ${cmd}.`,
       )
+    }
   }
 
   return (
@@ -4256,7 +4355,7 @@ function Analytics({
    SCREEN 27: IOT CITY STATUS
    ========================================================================= */
 
-function IoT({ language, back }: { language: Language back: () => void }) {
+function IoT({ language, back }: { language: Language; back: () => void }) {
   const rows = [
     ["Traffic Flow & Crossings", "Optimal", "Ultrasonic sensor array"],
     [
@@ -4635,7 +4734,7 @@ function HelpSupport({
    SCREEN 31: ACADEMIC SYSTEM MAPPING (IDEA LAB-V)
    ========================================================================= */
 
-function Academic({ language, back }: { language: Language back: () => void }) {
+function Academic({ language, back }: { language: Language; back: () => void }) {
   return (
     <main className="page">
       <Header title={t(language, "academicTitle")} onBack={back} />
@@ -5183,6 +5282,7 @@ export default function App() {
           go={go}
           back={back}
           speak={(text) => speakText(text, language)}
+          onVoiceCommand={handleStartVoiceRequest}
         />
       )}
 

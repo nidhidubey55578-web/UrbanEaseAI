@@ -124,7 +124,7 @@ export async function calculateRealRoutes(
   preferences: string[] = [],
 )// [lat, lon]
 // [lat, lon]
-: Promise<{ routes: CalculatedRoute[] error?: string }> {
+: Promise<{ routes: CalculatedRoute[]; error?: string }> {
   try {
     // OSRM coordinates format: {longitude},{latitude};{longitude},{latitude}
     const coords = `${start[1]},${start[0]};${end[1]},${end[0]}`
