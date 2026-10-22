@@ -1,0 +1,11 @@
+{
+  "title": "UrbanEase AI — Accessibility-First Urban Mobility",
+  "description": "UrbanEaseAI is an AI-powered mobility assistant designed for individuals with diverse accessibility needs, offering personalized route planning and real-time accessibility information for smarter urban navigation.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
