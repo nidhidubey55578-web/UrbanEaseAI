@@ -569,24 +569,31 @@ function Splash({
   const [transcript, setTranscript] = useState("")
   const [routeQuestion, setRouteQuestion] = useState("")
 
+  const recognitionRef = useRef<any>(null)
+  const isListeningRef = useRef(false)
+  const confirmingRef = useRef(false)
+  const silenceTimerRef = useRef<any>(null)
+  const preparedDestRef = useRef("")
+
   const promptGreeting = getVoiceGreeting(language)
 
-  const startListening = () => {
-    // 1. Immediately speak the required greeting: "Hi! How can I help you with directions?" in active language
-    const greeting = getVoiceGreeting(language)
-    setRouteQuestion(greeting)
-    setVoiceState("listening")
+  const stopRecognition = () => {
+    isListeningRef.current = false
+    confirmingRef.current = false
+    clearTimeout(silenceTimerRef.current)
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort()
+      } catch {}
+      recognitionRef.current = null
+    }
+  }
 
-    speakText(greeting, language, () => {
-      // Voice prompt finished speaking
-    })
-
-    // 2. Start speech recognition in the browser
+  const startBrowserRecognition = () => {
     const Recognition =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition
     if (!Recognition) {
-      // Graceful timeout so user is never stuck in error
       setTimeout(() => {
         setVoiceState((cur) => (cur === "listening" ? "ready" : cur))
       }, 4500)
@@ -594,64 +601,155 @@ function Splash({
     }
 
     try {
-      const recognition = new Recognition()
-      recognition.lang =
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort()
+        } catch {}
+      }
+
+      const rec = new Recognition()
+      recognitionRef.current = rec
+      rec.continuous = true
+      rec.interimResults = true
+      rec.lang =
         language === "Hindi"
           ? "hi-IN"
           : language === "Marathi"
             ? "mr-IN"
             : "en-IN"
-      recognition.interimResults = false
 
-      recognition.onstart = () => setVoiceState("listening")
-      recognition.onresult = (event: any) => {
-        const heard = event.results[0][0].transcript
-        setTranscript(heard)
-        setVoiceState("processing")
-
-        const prepared = onPrepareRoute(heard)
-        const question = t(language, "splashRouteReady", {
-          destination: prepared.destination,
-        })
-        setRouteQuestion(question)
-
-        speakText(question, language, () => {
-          setVoiceState("confirming")
-        })
+      rec.onstart = () => {
+        setVoiceState((cur) => (cur === "confirming" ? "confirming" : "listening"))
       }
 
-      recognition.onerror = () => {
-        setTimeout(() => setVoiceState("ready"), 2500)
+      rec.onresult = (event: any) => {
+        let interim = ""
+        let final = ""
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            final += event.results[i][0].transcript
+          } else {
+            interim += event.results[i][0].transcript
+          }
+        }
+        const text = (final || interim).trim()
+        if (!text) return
+        setTranscript(text)
+
+        // If in CONFIRMING state, listen for YES / NO / START / CANCEL:
+        if (confirmingRef.current) {
+          const lower = text.toLowerCase()
+          const isYes = [
+            "yes",
+            "yeah",
+            "yep",
+            "start",
+            "haan",
+            "ha",
+            "ho",
+            "chalo",
+            "sure",
+            "ok",
+            "okay",
+            "start direction",
+            "direction",
+            "start the direction",
+          ].some((w) => lower.includes(w))
+
+          const isNo = [
+            "no",
+            "nahin",
+            "nako",
+            "wait",
+            "view",
+            "routes",
+            "show",
+          ].some((w) => lower.includes(w))
+
+          if (isYes) {
+            stopRecognition()
+            setVoiceState("processing")
+            speakText("Starting the direction now.", language, () => {
+              onStartNavigation()
+            })
+            return
+          } else if (isNo) {
+            stopRecognition()
+            setVoiceState("processing")
+            speakText("Showing accessible routes.", language, () => {
+              onShowRoutes()
+            })
+            return
+          }
+        } else {
+          // In LISTENING state: user is speaking destination
+          clearTimeout(silenceTimerRef.current)
+          silenceTimerRef.current = setTimeout(() => {
+            handleDestinationHeard(text)
+          }, 1100)
+        }
       }
 
-      recognition.onend = () => {
-        setVoiceState((cur) => (cur === "listening" ? "ready" : cur))
+      rec.onerror = (e: any) => {
+        console.warn("Speech recognition notice:", e.error)
       }
 
-      recognition.start()
+      rec.onend = () => {
+        // Auto-restart if user still wants mic active so it NEVER cuts off early!
+        if (isListeningRef.current) {
+          try {
+            rec.start()
+          } catch {}
+        } else {
+          setVoiceState((cur) => (cur === "listening" ? "ready" : cur))
+        }
+      }
+
+      rec.start()
     } catch {
       setTimeout(() => setVoiceState("ready"), 2500)
     }
   }
 
+  const handleDestinationHeard = (heardText: string) => {
+    const prepared = onPrepareRoute(heardText)
+    preparedDestRef.current = prepared.destination
+    confirmingRef.current = true
+    setVoiceState("confirming")
+
+    const askDirection = `Should I start the direction to ${prepared.destination}?`
+    setRouteQuestion(askDirection)
+    speakText(askDirection, language)
+    // Speech recognition remains running in confirming mode so user can say "yes"!
+  }
+
+  const startListening = () => {
+    isListeningRef.current = true
+    confirmingRef.current = false
+    setTranscript("")
+
+    const greeting = getVoiceGreeting(language)
+    setRouteQuestion(greeting)
+    setVoiceState("listening")
+
+    speakText(greeting, language, () => {
+      // Voice greeting finished speaking
+    })
+
+    startBrowserRecognition()
+  }
+
   const handleDestinationSelect = (destName: string) => {
     setTranscript(destName)
-    setVoiceState("processing")
-    const prepared = onPrepareRoute(destName)
-    const question = t(language, "splashRouteReady", {
-      destination: prepared.destination,
-    })
-    setRouteQuestion(question)
-    speakText(question, language, () => {
-      setVoiceState("confirming")
-    })
+    handleDestinationHeard(destName)
   }
 
   const handleConfirmDecision = (startNav: boolean) => {
+    stopRecognition()
     setVoiceState("processing")
     const confirmMessage = startNav
-      ? t(language, "splashStarting")
-      : t(language, "splashShowing")
+      ? "Starting the direction now."
+      : "Showing accessible routes."
     speakText(confirmMessage, language, () => {
       if (startNav) onStartNavigation()
       else onShowRoutes()
@@ -1381,25 +1479,76 @@ function VoiceSetup({
   speak: (s: string) => void
 }) {
   const [editing, setEditing] = useState(false)
-  const rows = [
-    [
-      "What type of mobility assistance would you prefer?",
-      "I use a wheelchair or stroller",
-    ],
-    [
-      "Would you like step-free routes avoiding stairs?",
-      "Yes, avoid all stairs",
-    ],
-    [
-      "Do you prefer accessible public transport?",
-      "Yes, low-floor buses and trains",
-    ],
-    [
-      "Would you like spoken voice alerts on approach?",
-      "Yes, spoken navigation enabled",
-    ],
-    ["Which language would you like for guidance?", language],
+  const defaultRows = [
+    {
+      q: "What type of mobility assistance would you prefer?",
+      a: "I use a wheelchair or stroller",
+    },
+    {
+      q: "Would you like step-free routes avoiding stairs?",
+      a: "Yes, avoid all stairs",
+    },
+    {
+      q: "Do you prefer accessible public transport?",
+      a: "Yes, low-floor buses and trains",
+    },
+    {
+      q: "Would you like spoken voice alerts on approach?",
+      a: "Yes, spoken navigation enabled",
+    },
+    {
+      q: "Which language would you like for guidance?",
+      a: language,
+    },
   ]
+
+  const [items, setItems] = useState(defaultRows)
+  const [activeListeningIndex, setActiveListeningIndex] = useState<number | null>(null)
+
+  const handleRowMicClick = (index: number) => {
+    const item = items[index]
+    setActiveListeningIndex(index)
+    playMicChime()
+
+    // Audibly speak the question
+    speak(item.q)
+
+    const Recognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition
+    if (!Recognition) {
+      setTimeout(() => setActiveListeningIndex(null), 3000)
+      return
+    }
+
+    try {
+      const rec = new Recognition()
+      rec.lang =
+        language === "Hindi"
+          ? "hi-IN"
+          : language === "Marathi"
+            ? "mr-IN"
+            : "en-IN"
+      rec.interimResults = false
+      rec.onresult = (e: any) => {
+        const heard = e.results[0][0].transcript
+        if (heard) {
+          setItems((prev) => {
+            const next = [...prev]
+            next[index] = { ...next[index], a: heard }
+            return next
+          })
+          speak(`Saved: ${heard}`)
+        }
+        setActiveListeningIndex(null)
+      }
+      rec.onerror = () => setActiveListeningIndex(null)
+      rec.onend = () => setActiveListeningIndex(null)
+      rec.start()
+    } catch {
+      setActiveListeningIndex(null)
+    }
+  }
 
   return (
     <main className="page voice-page">
@@ -1417,25 +1566,70 @@ function VoiceSetup({
       </div>
 
       <div className="conversation-list">
-        {rows.map(([q, a], i) => (
-          <div className="conversation-row" key={q}>
-            <div className="assistant-line">
-              <Icon name="voice" size={16} />
-              <span>{q}</span>
+        {items.map((item, i) => (
+          <div className="conversation-row" key={item.q}>
+            <div className="assistant-line" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                type="button"
+                className={`row-mic-btn ${activeListeningIndex === i ? "active-listening" : ""}`}
+                onClick={() => handleRowMicClick(i)}
+                aria-label={`Listen or speak: ${item.q}`}
+                title="Tap to speak or listen to this question"
+                style={{
+                  background: activeListeningIndex === i ? "#009f9a" : "#eeecff",
+                  color: activeListeningIndex === i ? "#ffffff" : "#5846c7",
+                  border: "none",
+                  borderRadius: "50%",
+                  width: "30px",
+                  height: "30px",
+                  display: "grid",
+                  placeItems: "center",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                  transition: "all 0.2s ease",
+                }}
+              >
+                <Icon name="voice" size={16} />
+              </button>
+              <span>{item.q}</span>
             </div>
             <div className="user-line">
               {editing ? (
-                <input aria-label={q} defaultValue={a} />
+                <input
+                  aria-label={item.q}
+                  value={item.a}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    setItems((prev) => {
+                      const next = [...prev]
+                      next[i] = { ...next[i], a: val }
+                      return next
+                    })
+                  }}
+                />
               ) : (
-                <span>{a}</span>
+                <span>{item.a}</span>
               )}
               <Icon name="check" size={16} />
             </div>
-            {i === 0 && (
-              <button className="speak-link" onClick={() => speak(q)}>
-                {t(language, "speakAgain")}
+            <div style={{ display: "flex", gap: "10px", marginTop: "4px" }}>
+              <button
+                type="button"
+                className="speak-link"
+                onClick={() => handleRowMicClick(i)}
+                style={{ cursor: "pointer", background: "none", border: "none", color: "#5846c7", fontSize: "12px", fontWeight: "600" }}
+              >
+                {activeListeningIndex === i ? "🎙️ Listening to your answer…" : "🎙️ Speak answer"}
               </button>
-            )}
+              <button
+                type="button"
+                className="speak-link"
+                onClick={() => speak(item.q)}
+                style={{ cursor: "pointer", background: "none", border: "none", color: "#68728d", fontSize: "12px" }}
+              >
+                🔊 Read aloud
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -2569,6 +2763,76 @@ function Journey({
 }) {
   const [currentStepIndex, setCurrentStepIndex] = useState(0)
 
+  // Continuous speech listener in Journey: stop navigation when user says "stop the direction"
+  useEffect(() => {
+    const Recognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition
+    if (!Recognition) return
+
+    let active = true
+    let rec: any = null
+
+    try {
+      rec = new Recognition()
+      rec.continuous = true
+      rec.interimResults = true
+      rec.lang =
+        language === "Hindi"
+          ? "hi-IN"
+          : language === "Marathi"
+            ? "mr-IN"
+            : "en-IN"
+
+      rec.onresult = (event: any) => {
+        let text = ""
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          text += event.results[i][0].transcript
+        }
+        const lower = text.toLowerCase().trim()
+        const stopKeywords = [
+          "stop the direction",
+          "stop direction",
+          "stop navigation",
+          "stop",
+          "cancel",
+          "ruko",
+          "thamba",
+          "band karo",
+          "end navigation",
+        ]
+        if (stopKeywords.some((w) => lower.includes(w))) {
+          active = false
+          try {
+            rec.stop()
+          } catch {}
+          speak("Stopping directions.")
+          notify("Directions stopped.")
+          go("home")
+        }
+      }
+
+      rec.onend = () => {
+        if (active) {
+          try {
+            rec.start()
+          } catch {}
+        }
+      }
+
+      rec.start()
+    } catch {}
+
+    return () => {
+      active = false
+      if (rec) {
+        try {
+          rec.abort()
+        } catch {}
+      }
+    }
+  }, [language, go, speak, notify])
+
   const step = route.instructions[currentStepIndex] ||
     route.instructions[0] || {
       instruction: "Proceed toward destination along step-free street route.",
@@ -2621,6 +2885,34 @@ function Journey({
         >
           <Icon name="signal" size={20} />
         </button>
+      </div>
+
+      <div
+        className="journey-voice-indicator"
+        onClick={() => {
+          speak("Stopping directions.")
+          notify("Directions stopped.")
+          go("home")
+        }}
+        title="Tap to stop directions or say 'stop the direction'"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "8px",
+          background: "rgba(0,159,154,0.18)",
+          color: "#009f9a",
+          borderRadius: "14px",
+          padding: "6px 14px",
+          fontSize: "12px",
+          fontWeight: "600",
+          margin: "8px auto",
+          width: "fit-content",
+          cursor: "pointer",
+        }}
+      >
+        <Icon name="voice" size={14} />
+        <span>Voice active: say <b>"stop the direction"</b> or tap here to stop</span>
       </div>
 
       {/* Real Interactive Leaflet Map with actual step location pin */}
